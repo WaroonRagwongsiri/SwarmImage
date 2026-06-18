@@ -1,5 +1,8 @@
 FROM ubuntu:24.04
 
+# ---- Global Configuration ----
+ENV PERSISTENT_DIR="/root"
+
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=en_US.UTF-8
 ENV LANGUAGE=en_US:en
@@ -8,133 +11,89 @@ ENV LC_ALL=en_US.UTF-8
 # Add KKU Thai mirror with the official Ubuntu archive as a fallback
 RUN sed -i 's|URIs: http://archive.ubuntu.com/ubuntu/|URIs: http://mirror.kku.ac.th/ubuntu/ http://archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
 
-# Full system packages — VM-like experience
+# ---- Persistence: redirect apt cache, keep .debs, auto-record manifest ----
+RUN mkdir -p ${PERSISTENT_DIR}/apt-cache && \
+	chown -R _apt:root ${PERSISTENT_DIR}/apt-cache && \
+	printf "Dir::Cache::Archives \"${PERSISTENT_DIR}/apt-cache\";\n" > /etc/apt/apt.conf.d/01-persistent-cache && \
+	printf 'Binary::apt::APT::Keep-Downloaded-Packages "true";\n' > /etc/apt/apt.conf.d/02-keep-debs && \
+	printf "DPkg::Post-Invoke { \"apt-mark showmanual > ${PERSISTENT_DIR}/installed.manifest.new && mv ${PERSISTENT_DIR}/installed.manifest.new ${PERSISTENT_DIR}/installed.manifest || true\"; };\n" > /etc/apt/apt.conf.d/03-manifest-hook
+
+# ---- Full system packages — VM-like experience ----
 RUN apt-get update && apt-get install -y --no-install-recommends \
-	iputils-ping \
-	iproute2 \
-	net-tools \
-	dnsutils \
-	traceroute \
-	nmap \
-	wget \
-	curl \
-	vim \
-	nano \
-	htop \
-	tmux \
-	screen \
-	tree \
-	less \
-	build-essential \
-	git \
-	git-lfs \
-	openssh-client \
-	jq \
-	zip \
-	rsync \
-	ffmpeg \
-	cmake \
-	sudo \
-	ca-certificates \
-	gnupg \
-	locales \
-	procps \
-	unzip \
-	fonts-thai-tlwg \
+	iputils-ping iproute2 net-tools dnsutils traceroute nmap \
+	wget curl vim nano htop tmux screen tree less build-essential \
+	git git-lfs openssh-client jq zip rsync ffmpeg cmake sudo \
+	ca-certificates gnupg locales procps unzip fonts-thai-tlwg file \
 	&& locale-gen en_US.UTF-8 \
 	&& rm -rf /var/lib/apt/lists/*
 
-## uv install
+# ---- uv install & Python 3.11 ----
 # Pull uv binary directly
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv_python
-
 RUN uv python install 3.11
 
 ENV VIRTUAL_ENV=/opt/venv
 RUN uv venv $VIRTUAL_ENV --python 3.11
 
-## Library
+# Add venv to PATH so pip/python map directly to it
+ENV PATH="/opt/venv/bin:$PATH"
+
+# ---- Libraries ----
 # PyTorch (CUDA 13.0 — must install first to avoid conflicts)
 RUN uv pip install --no-cache-dir \
 	torch torchvision torchaudio \
 	--index-url https://download.pytorch.org/whl/cu130
 
 # TensorFlow (CUDA 13.0)
-RUN uv pip install --no-cache-dir \
-	tensorflow[and-cuda] \
-	tf-keras
+RUN uv pip install --no-cache-dir tensorflow[and-cuda] tf-keras
 
 # Core data science
 RUN uv pip install --no-cache-dir \
-	numpy \
-	pandas \
-	matplotlib \
-	scikit-learn \
-	scipy \
-	seaborn
+	numpy pandas matplotlib scikit-learn scipy seaborn
 
 # JupyterLab extensions — install BEFORE jupyterlab to prevent downgrade
 RUN uv pip install --no-cache-dir \
-	ipywidgets \
-	jupyterlab-git \
-	jupyterlab-code-formatter \
-	jupyter-resource-usage \
-	jupyterlab-favorites \
-	jupyter-archive \
-	'jupyter-server-proxy[standalone]' \
-	black isort \
+	ipywidgets jupyterlab-git jupyterlab-code-formatter \
+	jupyter-resource-usage jupyterlab-favorites jupyter-archive \
+	'jupyter-server-proxy[standalone]' black isort \
 	&& jupyter labextension disable "@jupyterlab/filebrowser-extension:share-file" 2>/dev/null || true
 
 # JupyterLab 4.x — install AFTER extensions with --reinstall to guarantee version
 RUN uv pip install --no-cache-dir --reinstall \
-	jupyterlab==4.2.7 \
-	jupyter_server \
-	notebook \
-	ipykernel \
-	&& /opt/venv/bin/python -c "import jupyterlab; print(f'JupyterLab {jupyterlab.__version__} OK')" \
-	&& /opt/venv/bin/python -c "import ipykernel; print(f'ipykernel OK')" \
-	&& /opt/venv/bin/jupyter --version
+	jupyterlab==4.2.7 jupyter_server notebook ipykernel \
+	&& python -c "import jupyterlab; print(f'JupyterLab {jupyterlab.__version__} OK')" \
+	&& python -c "import ipykernel; print(f'ipykernel OK')" \
+	&& jupyter --version
 
 # AI/ML — Hugging Face
 RUN uv pip install --no-cache-dir \
-	transformers \
-	datasets \
-	accelerate \
-	peft \
-	bitsandbytes \
-	tokenizers \
-	huggingface_hub \
-	safetensors
+	transformers datasets accelerate peft bitsandbytes tokenizers \
+	huggingface_hub safetensors
 
 # AI/ML — Generative AI / LLM
 RUN uv pip install --no-cache-dir \
-	langchain \
-	langchain-community \
-	sentence-transformers \
-	diffusers
+	langchain langchain-community sentence-transformers diffusers
 
-# Node.js
+# ---- Node.js & Proxies ----
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 	&& apt-get install -y --no-install-recommends nodejs \
 	&& rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g configurable-http-proxy
 
-# JupyterHub + FirstUseAuthenticator
+# ---- JupyterHub + FirstUseAuthenticator ----
 RUN uv pip install --no-cache-dir \
-	jupyterhub \
-	jupyterhub-firstuseauthenticator \
-	jupyterhub-idle-culler
-
-# JupyterHub config
-COPY jupyterhub_config.py /etc/jupyterhub/jupyterhub_config.py
+	jupyterhub jupyterhub-firstuseauthenticator jupyterhub-idle-culler
 
 # Make /root group-writable so JupyterHub users (group root) can read/write
 RUN chmod 775 /root
 
-# Entrypoint
+# JupyterHub config
+COPY jupyterhub_config.py /etc/jupyterhub/jupyterhub_config.py
+
+# ---- Entrypoint & Daemon Setup ----
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
@@ -147,4 +106,6 @@ ENV JUPYTERHUB_SHARE_SECRET=sharetoken
 
 WORKDIR /root
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["bash"]
+
+# JupyterHub starts automatically unless overridden
+CMD ["/opt/venv/bin/jupyterhub", "-f", "/etc/jupyterhub/jupyterhub_config.py"]
